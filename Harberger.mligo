@@ -75,7 +75,7 @@ type forced_sale =
 type tax_param =
 [@layout:comb]
 {
-  from_: address;
+  owner: address;
   amount: tez;
 }
 
@@ -188,9 +188,6 @@ let dec_balance (owner, token_id, amt, ledger
     then Big_map.remove key ledger
     else Big_map.update key (Some next_bal) ledger
 
-(*
-
-*)
 let start_tax (owner, token_id, amt, token_prices, tax_records
     : address * token_id * nat * token_price_storage * tax_record_storage): tax_record_storage =
   let key = owner, token_id in
@@ -205,9 +202,6 @@ let start_tax (owner, token_id, amt, token_prices, tax_records
   let next_record_list = record :: record_list in
   Big_map.update key (Some next_record_list) tax_records
 
-(*
-  
-*)
 let end_tax (owner, token_id, amt, token_prices, tax_records
     : address * token_id * nat * token_price_storage * tax_record_storage): tax_record_storage =
   let key = owner, token_id in
@@ -266,7 +260,7 @@ type entry_points =
 
 type return = operation list * storage
 
-(* Allows operator to transfer tokens in batch to recipients *)
+(* Operator transfers tokens in batch to recipients *)
 let transfer (transfers, store: transfer list * storage): return =
   let make_transfer (s, tx: storage * transfer) =
     let token_exists (token_id: token_id): bool =
@@ -294,11 +288,41 @@ let transfer (transfers, store: transfer list * storage): return =
   let next_store = List.fold make_transfer transfers store in
   ([]: operation list), next_store
 
+(* Send balances to callback in batches *)
 let balances (param, store: balance_of_param * storage): return =
-  ([]: operation list), store
+  let to_balance (r: balance_of_request) =
+    if not Big_map.mem r.token_id store.token_metadata
+    then (failwith "FA2_TOKEN_UNDEFINED" : balance_of_response)
+    else
+      let key = r.owner, r.token_id in
+      let bal = find_balance (key, store.ledger) in
+      { request = r; balance = bal }
+  in
+  let responses = List.map to_balance param.requests in
+  let op = Tezos.transaction responses 0mutez param.callback in
+  [op], store
 
-let update_operators (operators, store: update_operator list * storage): return =
-  ([]: operation list), store
+(* Token owners change operators in batches *)
+let update_operators (updates, store: update_operator list * storage): return =
+  let process_update (ops, update: operator_storage * update_operator) =
+    let validate_owner (op: operator_param): bool =
+      if op.owner = Tezos.sender then
+        true
+      else
+        (failwith "FA2_NOT_OWNER")
+    in
+    match update with
+    | Add_operator op ->
+      let ok = validate_owner op in
+      let key = (op.owner, op.operator, op.token_id) in
+      Big_map.update key (Some unit) store.operators
+    | Remove_operator op ->
+      let ok = validate_owner op in
+      let key = (op.owner, op.operator, op.token_id) in
+      Big_map.remove key store.operators
+  in
+  let next_operators = List.fold process_update updates store.operators in
+  ([]: operation list), {store with operators = next_operators}
 
 let create_token (metadata, store: token_metadata * storage): return =
   ([]: operation list), store
@@ -327,7 +351,7 @@ let main (action, store: entry_points * storage): return =
   match action with
   | Transfer transfers -> transfer (transfers, store)
   | Balance_of param -> balances (param, store)
-  | Update_operators operators -> update_operators (operators, store)
+  | Update_operators updates -> update_operators (updates, store)
   | Create_token metadata -> create_token (metadata, store)
   | Mint_token mints -> mint_token (mints, store)
   | Force_sale sales -> force_sale (sales, store)
