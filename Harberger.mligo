@@ -55,6 +55,30 @@ type update_operator =
 
 (* Contract interface *)
 
+type tax_record = {
+  value: tez;
+  amount: nat;
+  start_date: timestamp;
+  end_date: timestamp option;
+}
+
+type token_metadata = {
+  token_id: token_id;
+  owner: address;
+  symbol: string;
+  name: string;
+  decimals: nat;
+  tax: nat;
+  extras: (string, string) map;
+}
+
+type create_token_param =
+[@layout:comb]
+{
+  metadata: token_metadata;
+  supply: nat;
+}
+
 type mint = transfer_destination
 
 type forced_sale_origin =
@@ -109,23 +133,6 @@ type price_update =
 }
 
 (* Storage *)
-
-type tax_record = {
-  value: tez;
-  amount: nat;
-  start_date: timestamp;
-  end_date: timestamp option;
-}
-
-type token_metadata = {
-  token_id: token_id;
-  owner: address;
-  symbol: string;
-  name: string;
-  decimals: nat;
-  tax: nat;
-  extras: (string, string) map;
-}
 
 type ledger = ((address * token_id), nat) big_map
 
@@ -250,7 +257,7 @@ type entry_points =
 | Transfer of transfer list
 | Balance_of of balance_of_param
 | Update_operators of update_operator list
-| Create_token of token_metadata
+| Create_token of create_token_param
 | Mint_token of mint list
 | Force_sale of forced_sale list
 | Deposit_tax of tax_param
@@ -324,11 +331,41 @@ let update_operators (updates, store: update_operator list * storage): return =
   let next_operators = List.fold process_update updates store.operators in
   ([]: operation list), {store with operators = next_operators}
 
-let create_token (metadata, store: token_metadata * storage): return =
-  ([]: operation list), store
+(* Create new token specification with a total supply *)
+let create_token (param, store: create_token_param * storage): return =
+  let token_id = param.metadata.token_id in
+  if Big_map.mem token_id store.token_metadata then
+    (failwith "token already exists" : return)
+  else
+    let next_token_metadata = Big_map.update token_id (Some param.metadata) store.token_metadata in
+    let next_token_total_supply = Big_map.update token_id (Some param.supply) store.token_total_supply in
+    let next_store = {
+      store with
+      token_metadata = next_token_metadata;
+      token_total_supply = next_token_total_supply;
+    } in
+    ([]: operation list), next_store
 
+(* Operator of token spec mints in batch to recipients *)
 let mint_token (mints, store: mint list * storage): return =
-  ([]: operation list), store
+  let process_mint (s, mint: storage * mint) =
+    let is_operator (token_id: token_id): bool =
+      match Big_map.find_opt token_id s.token_metadata with
+      | None -> (failwith "token undefined" : bool)
+      | Some metadata ->
+        if Tezos.sender = metadata.owner
+        then true
+        else if Big_map.mem (metadata.owner, Tezos.sender, token_id) s.operators
+        then true
+        else (failwith "FA2_NOT_OPERATOR" : bool)
+    in
+    let ok = is_operator mint.token_id in
+    let next_ledger = inc_balance (mint.to_, mint.token_id, mint.amount, s.ledger) in
+    let next_tax_records = start_tax (mint.to_, mint.token_id, mint.amount, s.token_prices, s.tax_records) in
+    {store with ledger = next_ledger; tax_records = next_tax_records}
+  in
+  let next_store = List.fold process_mint mints store in
+  ([]: operation list), next_store
 
 let force_sale (sales, store: forced_sale list * storage): return =
   ([]: operation list), store
@@ -352,7 +389,7 @@ let main (action, store: entry_points * storage): return =
   | Transfer transfers -> transfer (transfers, store)
   | Balance_of param -> balances (param, store)
   | Update_operators updates -> update_operators (updates, store)
-  | Create_token metadata -> create_token (metadata, store)
+  | Create_token param -> create_token (param, store)
   | Mint_token mints -> mint_token (mints, store)
   | Force_sale sales -> force_sale (sales, store)
   | Deposit_tax param -> deposit_tax (param, store)
