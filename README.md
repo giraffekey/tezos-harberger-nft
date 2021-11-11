@@ -10,7 +10,7 @@ Based on the ideas of economists [Henry George](https://en.wikipedia.org/wiki/He
 
 Harberger NFTs are digital tokens that always have an open sell order at a self-assessed price. The token is in constant auction and a sale can be forced at any moment. Holders set the price of their own NFT stock and pay a weekly or monthly tax to the minter on it. High self-assessed values have a low likelihood of a forced sale, but a high periodic tax. Low self-assessed values have a low periodic tax, but a high likelihood of a forced sale.
 
-Holders must make a deposit to pay for their tax to maintain ownership over their tokens. This deposit can be withdrawn at any moment. If their deposit ever runs out, a buyer can force a sale at no expense, transferring token ownership to themselves for free.
+Holders must deposit cryptocurrency to pay for their tax to maintain ownership over their tokens. This deposit can be withdrawn at any moment. If their deposit ever runs out, a buyer can force a sale at no expense, transferring token ownership to themselves for free. Taxes are lazily netted and can be claimed from the contract by their recipients.
 
 Harberger tax systems result in accurately priced tokens due to this trade-off as well as a potential source of regular income for the artists minting them.
 
