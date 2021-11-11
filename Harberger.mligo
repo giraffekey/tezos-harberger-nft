@@ -79,7 +79,15 @@ type create_token_param =
   supply: nat;
 }
 
-type mint = transfer_destination
+type mint =
+[@layout:comb]
+{
+  to_: address;
+  token_id: token_id;
+  amount: nat;
+  price: tez;
+  tax_deposit: tez;
+}
 
 type forced_sale_origin =
 [@layout:comb]
@@ -144,7 +152,7 @@ type token_metadata_storage = (token_id, token_metadata) big_map
 
 type token_price_storage = ((address * token_id), tez) big_map
 
-type tax_deposit_storage = ((address * token_id), tez) big_map
+type tax_deposit_storage = (address, tez) big_map
 
 type tax_record_storage = ((address * token_id), tax_record list) big_map
 
@@ -251,6 +259,9 @@ let end_tax (owner, token_id, amt, token_prices, tax_records
   else
     (failwith "FA2_INSUFFICIENT_BALANCE" : tax_record_storage)
 
+let calculate_spent_tax (owner, tax_records: address * tax_record_storage): tez =
+  0tez
+
 (* Entry points *)
 
 type entry_points =
@@ -346,9 +357,12 @@ let create_token (param, store: create_token_param * storage): return =
     } in
     ([]: operation list), next_store
 
-(* Operator of token spec mints in batch to recipients *)
+(*
+  Operator of token spec mints in batch to recipients
+  Operators set a default price on behalf of recipient and have the option of funding the tax deposit
+*)
 let mint_token (mints, store: mint list * storage): return =
-  let process_mint (s, mint: storage * mint) =
+  let process_mint ((s, amt), mint: (storage * tez) * mint) =
     let is_operator (token_id: token_id): bool =
       match Big_map.find_opt token_id s.token_metadata with
       | None -> (failwith "token undefined" : bool)
@@ -359,22 +373,66 @@ let mint_token (mints, store: mint list * storage): return =
         then true
         else (failwith "FA2_NOT_OPERATOR" : bool)
     in
-    let ok = is_operator mint.token_id in
-    let next_ledger = inc_balance (mint.to_, mint.token_id, mint.amount, s.ledger) in
-    let next_tax_records = start_tax (mint.to_, mint.token_id, mint.amount, s.token_prices, s.tax_records) in
-    {store with ledger = next_ledger; tax_records = next_tax_records}
+    if amt < mint.tax_deposit then
+      (failwith "amount does not match tax deposit" : storage * tez)
+    else
+      let ok = is_operator mint.token_id in
+      let next_ledger = inc_balance (mint.to_, mint.token_id, mint.amount, s.ledger) in
+      let next_token_prices = Big_map.update (mint.to_, mint.token_id) (Some mint.price) s.token_prices in
+      let next_tax_deposits = Big_map.update mint.to_ (Some mint.tax_deposit) s.tax_deposits in
+      let next_tax_records = start_tax (mint.to_, mint.token_id, mint.amount, next_token_prices, s.tax_records) in
+      let next_store = {
+        s with
+        ledger = next_ledger;
+        token_prices = next_token_prices;
+        tax_deposits = next_tax_deposits;
+        tax_records = next_tax_records;
+      } in
+      let next_amt = amt - mint.tax_deposit in
+      (next_store, next_amt)
   in
-  let next_store = List.fold process_mint mints store in
-  ([]: operation list), next_store
+  let next_store, remaining = List.fold process_mint mints (store, Tezos.amount) in
+  if remaining > 0tez then
+    (failwith "amount does not match tax deposit" : return)
+  else
+    ([]: operation list), next_store
 
 let force_sale (sales, store: forced_sale list * storage): return =
   ([]: operation list), store
 
+(* Deposit tax for self or another *)
 let deposit_tax (param, store: tax_param * storage): return =
-  ([]: operation list), store
+  if Tezos.amount <> param.amount then
+    (failwith "amount does not match tax deposit" : return)
+  else
+    let next_tax_deposits = Big_map.update param.owner (Some param.amount) store.tax_deposits in
+    let next_store = {store with tax_deposits = next_tax_deposits} in
+    ([]: operation list), next_store
 
+(* Owner can withdraw any unspent tax deposit *)
 let withdraw_tax (param, store: tax_param * storage): return =
-  ([]: operation list), store
+  if Tezos.sender <> param.owner then
+    (failwith "FA2_NOT_OPERATOR" : return)
+  else
+    match Big_map.find_opt param.owner store.tax_deposits with
+    | None -> (failwith "tax deposit not found" : return)
+    | Some deposit ->
+      let spent_tax = calculate_spent_tax (param.owner, store.tax_records) in
+      let next_deposit =
+        if param.amount >= deposit - spent_tax then
+          deposit - param.amount
+        else
+          (failwith "not enough unspent tax to withdraw" : tez)
+      in
+      let next_tax_deposits = Big_map.update param.owner (Some next_deposit) store.tax_deposits in
+      let next_store = {store with tax_deposits = next_tax_deposits} in
+      let op =
+        Tezos.transaction () param.amount
+        ( match (Tezos.get_contract_opt param.owner : unit contract option) with
+          Some contract -> contract
+        | None -> failwith "Contract does not exist" : unit contract)
+      in
+      [op], next_store
 
 let claim_tax (claims, store: tax_claim list * storage): return =
   ([]: operation list), store
