@@ -55,13 +55,6 @@ type update_operator =
 
 (* Contract interface *)
 
-type tax_record = {
-  value: tez;
-  amount: nat;
-  start_date: timestamp;
-  end_date: timestamp option;
-}
-
 type token_metadata = {
   token_id: token_id;
   owner: address;
@@ -71,6 +64,18 @@ type token_metadata = {
   tax: nat;
   tax_interval: nat;
   extras: (string, string) map;
+}
+
+type price = {
+  current: tez;
+  minimum: tez;
+}
+
+type tax_record = {
+  value: tez;
+  amount: nat;
+  start_date: timestamp;
+  end_date: timestamp option;
 }
 
 type create_token_param =
@@ -152,7 +157,7 @@ type token_total_supply = (token_id, nat) big_map
 
 type token_metadata_storage = (token_id, token_metadata) big_map
 
-type token_price_storage = ((address * token_id), tez) big_map
+type token_price_storage = ((address * token_id), price) big_map
 
 type tax_deposit_storage = ((address * token_id), tez) big_map
 
@@ -183,9 +188,12 @@ let find_records (key, tax_records: (address * token_id) * tax_record_storage): 
   | None -> []
   | Some record_list -> record_list
 
-let find_price (key, token_prices: (address * token_id) * token_price_storage): tez =
+let find_price (key, token_prices: (address * token_id) * token_price_storage): price =
   match Big_map.find_opt key token_prices with
-  | None -> 0tez
+  | None -> {
+      current = 0tez;
+      minimum = 0tez;
+    }
   | Some price -> price
 
 let find_metadata (token_id, token_metadata: token_id * token_metadata_storage): token_metadata =
@@ -231,7 +239,7 @@ let start_tax (owner, token_id, amt, token_prices, tax_records
   let record_list = find_records (key, tax_records) in
   let price = find_price (key, token_prices) in
   let record = {
-    value = price;
+    value = price.current;
     amount = amt;
     start_date = Tezos.now;
     end_date = (None : timestamp option);
@@ -249,7 +257,7 @@ let end_tax (owner, token_id, amt, token_prices, tax_records
       (fun ((l, rem), record: (tax_record list * nat) * tax_record) ->
         if rem = 0n then
           record :: l, 0n
-        else if record.value = price && record.end_date = (None : timestamp option) then
+        else if record.value = price.current && record.end_date = (None : timestamp option) then
           if record.amount > rem then
             let end_record = {
               value = record.value;
@@ -326,10 +334,10 @@ let transfer (transfers, store: transfer list * storage): return =
       (fun (s, dest: storage * transfer_destination) ->
         let ok = is_operator (dest.to_, dest.token_id, s.operators) in
         let l = dec_balance (tx.from_, dest.token_id, dest.amount, s.ledger) in
-        let ll = inc_balance (dest.to_, dest.token_id, dest.amount, l) in
+        let next_ledger = inc_balance (dest.to_, dest.token_id, dest.amount, l) in
         let r = end_tax (tx.from_, dest.token_id, dest.amount, s.token_prices, s.tax_records) in
-        let rr = start_tax (dest.to_, dest.token_id, dest.amount, s.token_prices, r) in
-        {store with ledger = ll; tax_records = rr}
+        let next_tax_records = start_tax (dest.to_, dest.token_id, dest.amount, s.token_prices, r) in
+        {s with ledger = next_ledger; tax_records = next_tax_records}
       ) tx.txs s
   in
   let next_store = List.fold process_transfer transfers store in
@@ -398,7 +406,11 @@ let mint_token (mints, store: mint list * storage): return =
       let metadata = find_metadata (mint.token_id, s.token_metadata) in
       let ok = is_operator (metadata.owner, mint.token_id, s.operators) in
       let next_ledger = inc_balance (mint.to_, mint.token_id, mint.amount, s.ledger) in
-      let next_token_prices = Big_map.update (mint.to_, mint.token_id) (Some mint.price) s.token_prices in
+      let price = {
+        current = mint.price;
+        minimum = mint.price;
+      } in
+      let next_token_prices = Big_map.update (mint.to_, mint.token_id) (Some price) s.token_prices in
       let next_tax_deposits = Big_map.update (mint.to_, mint.token_id) (Some mint.tax_deposit) s.tax_deposits in
       let next_tax_records = start_tax (mint.to_, mint.token_id, mint.amount, next_token_prices, s.tax_records) in
       let next_store = {
@@ -418,7 +430,46 @@ let mint_token (mints, store: mint list * storage): return =
     ([]: operation list), next_store
 
 let force_sale (sales, store: forced_sale list * storage): return =
-  ([]: operation list), store
+  let process_sale (acc, tx: (operation list * storage * tez) * forced_sale) =
+    List.fold
+      (fun ((ops, s, amt), origin: (operation list * storage * tez) * forced_sale_origin) ->
+        let key = origin.from_, origin.token_id in
+        let price = find_price (key, s.token_prices) in
+        let cost = price.current * origin.amount in
+        if amt < cost then
+          (failwith "amount does not match cost" : operation list * storage * tez)
+        else
+          let ok = is_operator (tx.to_, origin.token_id, s.operators) in
+          let l = dec_balance (origin.from_, origin.token_id, origin.amount, s.ledger) in
+          let next_ledger = inc_balance (tx.to_, origin.token_id, origin.amount, l) in
+          let r = end_tax (origin.from_, origin.token_id, origin.amount, s.token_prices, s.tax_records) in
+          let next_price = {
+            current = price.current + 1mutez;
+            minimum = price.current + 1mutez;
+          } in
+          let next_token_prices = Big_map.update (tx.to_, origin.token_id) (Some next_price) s.token_prices in
+          let next_tax_records = start_tax (tx.to_, origin.token_id, origin.amount, next_token_prices, r) in
+          let next_store = {
+            s with
+            ledger = next_ledger;
+            tax_records = next_tax_records;
+            token_prices = next_token_prices;
+          } in
+          let next_amt = amt - cost in
+          let op =
+            Tezos.transaction () cost
+            ( match (Tezos.get_contract_opt origin.from_ : unit contract option) with
+              | Some contract -> contract
+              | None -> failwith "contract does not exist" : unit contract)
+          in
+          op :: ops, next_store, next_amt
+      ) tx.txs acc
+  in
+  let ops, next_store, remaining = List.fold process_sale sales (([] : operation list), store, Tezos.amount) in
+  if remaining > 0tez then
+    (failwith "amount does not match cost" : return)
+  else
+    ops, next_store
 
 (* Deposit tax for self or another *)
 let deposit_tax (param, store: tax_param * storage): return =
@@ -457,7 +508,7 @@ let withdraw_tax (param, store: tax_param * storage): return =
 
 (* Operator of token can claim spent taxes *)
 let claim_tax (claims, store: tax_claim list * storage): return =
-  let process_claim ((ops, s), tx: return * tax_claim) =
+  let process_claim (acc, tx: return * tax_claim) =
     let contract =
       match (Tezos.get_contract_opt tx.to_ : unit contract option) with
       | Some contract -> contract
@@ -475,10 +526,10 @@ let claim_tax (claims, store: tax_claim list * storage): return =
           let claimed = find_claimed (key, s.tax_claims) in
           let next_claimed = claimed + claim.amount in
           let next_tax_claims = Big_map.update (claim.from_, claim.token_id) (Some next_claimed) s.tax_claims in
-          let next_store = {store with tax_claims = next_tax_claims} in
+          let next_store = {s with tax_claims = next_tax_claims} in
           let op = Tezos.transaction () claim.amount contract in
           op :: ops, next_store
-      ) tx.txs (ops, s)
+      ) tx.txs acc
   in
   List.fold process_claim claims (([] : operation list), store)
 
