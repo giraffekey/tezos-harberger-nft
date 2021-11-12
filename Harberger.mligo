@@ -143,7 +143,7 @@ type price_set =
 type price_update =
 [@layout:comb]
 {
-  from_: address;
+  owner: address;
   txs: price_set list;
 }
 
@@ -534,7 +534,17 @@ let claim_tax (claims, store: tax_claim list * storage): return =
   List.fold process_claim claims (([] : operation list), store)
 
 let update_price (updates, store: price_update list * storage): return =
-  ([]: operation list), store
+  let process_update (prices, tx: token_price_storage * price_update) =
+    List.fold
+      (fun (prices, update: token_price_storage * price_set) ->
+        let key = tx.owner, update.token_id in
+        let price = find_price (key, prices) in
+        let next_price = {price with current = update.price} in
+        Big_map.update key (Some next_price) prices
+      ) tx.txs prices
+  in
+  let next_token_prices = List.fold process_update updates store.token_prices in
+  ([]: operation list), {store with token_prices = next_token_prices}
 
 (* Main function *)
 
