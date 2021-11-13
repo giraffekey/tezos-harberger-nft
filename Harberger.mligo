@@ -60,12 +60,10 @@ type mint =
 {
   to_: address;
   token_id: token_id;
-  owner: address;
-  symbol: string;
   name: string;
-  decimals: nat;
   tax: nat;
   tax_interval: nat;
+  tax_recipient: address;
   extras: (string, string) map;
   price: tez;
 }
@@ -125,13 +123,10 @@ type price_update =
 (* Storage *)
 
 type token_metadata = {
-  token_id: token_id;
-  owner: address;
-  symbol: string;
   name: string;
-  decimals: nat;
   tax: nat;
   tax_interval: nat;
+  tax_recipient: address;
   extras: (string, string) map;
 }
 
@@ -299,12 +294,17 @@ let transfer (transfers, store: transfer list * storage): return =
   let process_transfer (s, tx: storage * transfer) =
     List.fold
       (fun (s, dest: storage * transfer_destination) ->
-        let _ok = is_operator (dest.to_, dest.token_id, s.operators) in
-        let l = remove_token (tx.from_, dest.token_id, s.ledger) in
-        let next_ledger = add_token (dest.to_, dest.token_id, l) in
-        let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
-        let next_tax_records = start_tax (dest.to_, dest.token_id, s.token_prices, r) in
-        {s with ledger = next_ledger; tax_records = next_tax_records}
+        if dest.amount > 1n then
+          (failwith "total supply of non-fungible cannot exceed one" : storage)
+        else if dest.amount = 1n then
+          let _ok = is_operator (dest.to_, dest.token_id, s.operators) in
+          let l = remove_token (tx.from_, dest.token_id, s.ledger) in
+          let next_ledger = add_token (dest.to_, dest.token_id, l) in
+          let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
+          let next_tax_records = start_tax (dest.to_, dest.token_id, s.token_prices, r) in
+          {s with ledger = next_ledger; tax_records = next_tax_records}
+        else
+          s
       ) tx.txs s
   in
   let next_store = List.fold process_transfer transfers store in
@@ -361,13 +361,10 @@ let mint_token (mints, store: mint list * storage): return =
     else
       let next_ledger = add_token (mint.to_, mint.token_id, s.ledger) in
       let metadata = {
-        token_id = mint.token_id;
-        owner = mint.owner;
-        symbol = mint.symbol;
         name = mint.name;
-        decimals = mint.decimals;
         tax = mint.tax;
         tax_interval = mint.tax_interval;
+        tax_recipient = mint.tax_recipient;
         extras = mint.extras;
       } in
       let next_token_metadata = Big_map.update mint.token_id (Some metadata) s.token_metadata in
@@ -477,7 +474,7 @@ let claim_tax (claims, store: tax_claim list * storage): return =
     List.fold
       (fun ((ops, s), claim: return * tax_claim_origin) ->
         let metadata = find_metadata (claim.token_id, s.token_metadata) in
-        let _ok = is_operator (metadata.owner, claim.token_id, s.operators) in
+        let _ok = is_operator (metadata.tax_recipient, claim.token_id, s.operators) in
         let spent_tax = calculate_spent_tax (claim.from_, claim.token_id, s) in
         if spent_tax < claim.amount then
           (failwith "not enough tax spent to claim" : return)
@@ -542,7 +539,7 @@ let test_storage =
     tax_deposits = (Big_map.empty : tax_deposit_storage);
     tax_records = (Big_map.empty : tax_record_storage);
     tax_claims = (Big_map.empty : tax_claim_storage);
-  } in  
+  } in
   let (taddr, _, _) = Test.originate main initial_storage 0tez in
   let storage = Test.get_storage taddr in
   let example_addr = ("tz1gjaF81ZRRvdzjobyfVNsAeSC6PScjfQwN" : address) in
