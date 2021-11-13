@@ -299,7 +299,7 @@ let transfer (transfers, store: transfer list * storage): return =
   let process_transfer (s, tx: storage * transfer) =
     List.fold
       (fun (s, dest: storage * transfer_destination) ->
-        let ok = is_operator (dest.to_, dest.token_id, s.operators) in
+        let _ok = is_operator (dest.to_, dest.token_id, s.operators) in
         let l = remove_token (tx.from_, dest.token_id, s.ledger) in
         let next_ledger = add_token (dest.to_, dest.token_id, l) in
         let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
@@ -339,13 +339,13 @@ let update_operators (updates, store: update_operator list * storage): return =
     in
     match update with
     | Add_operator op ->
-      let ok = validate_owner op in
+      let _ok = validate_owner op in
       let key = (op.owner, op.operator, op.token_id) in
-      Big_map.update key (Some unit) store.operators
+      Big_map.update key (Some unit) ops
     | Remove_operator op ->
-      let ok = validate_owner op in
+      let _ok = validate_owner op in
       let key = (op.owner, op.operator, op.token_id) in
-      Big_map.remove key store.operators
+      Big_map.remove key ops
   in
   let next_operators = List.fold process_update updates store.operators in
   ([]: operation list), {store with operators = next_operators}
@@ -397,7 +397,7 @@ let force_sale (sales, store: forced_sale list * storage): return =
         if amt < cost then
           (failwith "amount does not match cost" : operation list * storage * tez)
         else
-          let ok = is_operator (tx.to_, origin.token_id, s.operators) in
+          let _ok = is_operator (tx.to_, origin.token_id, s.operators) in
           let l = remove_token (origin.from_, origin.token_id, s.ledger) in
           let next_ledger = add_token (tx.to_, origin.token_id, l) in
           let r = end_tax (origin.from_, origin.token_id, s.token_prices, s.tax_records) in
@@ -445,7 +445,7 @@ let withdraw_tax (param, store: tax_param * storage): return =
   if Tezos.sender <> param.owner then
     (failwith "FA2_NOT_OPERATOR" : return)
   else
-    let ok = is_operator (param.owner, param.token_id, store.operators) in
+    let _ok = is_operator (param.owner, param.token_id, store.operators) in
     match Big_map.find_opt param.owner store.tax_deposits with
     | None -> (failwith "tax deposit not found" : return)
     | Some deposit ->
@@ -477,7 +477,7 @@ let claim_tax (claims, store: tax_claim list * storage): return =
     List.fold
       (fun ((ops, s), claim: return * tax_claim_origin) ->
         let metadata = find_metadata (claim.token_id, s.token_metadata) in
-        let ok = is_operator (metadata.owner, claim.token_id, s.operators) in
+        let _ok = is_operator (metadata.owner, claim.token_id, s.operators) in
         let spent_tax = calculate_spent_tax (claim.from_, claim.token_id, s) in
         if spent_tax < claim.amount then
           (failwith "not enough tax spent to claim" : return)
@@ -498,7 +498,7 @@ let update_price (updates, store: price_update list * storage): return =
   let process_update (s, tx: storage * price_update) =
     List.fold
       (fun (s, update: storage * price_set) ->
-        let ok = is_operator (tx.owner, update.token_id, s.operators) in
+        let _ok = is_operator (tx.owner, update.token_id, s.operators) in
         let tokens = find_tokens (tx.owner, s.ledger) in
         let key = tx.owner, update.token_id in
         let price = find_price (key, s.token_prices) in
@@ -532,3 +532,20 @@ let main (action, store: entry_points * storage): return =
   | Update_price updates -> update_price (updates, store)
   
 (* Unit tests *)
+
+let test_storage =
+  let initial_storage = {
+    ledger = (Big_map.empty : ledger);
+    operators = (Big_map.empty : operator_storage);
+    token_metadata = (Big_map.empty : token_metadata_storage);
+    token_prices = (Big_map.empty : token_price_storage);
+    tax_deposits = (Big_map.empty : tax_deposit_storage);
+    tax_records = (Big_map.empty : tax_record_storage);
+    tax_claims = (Big_map.empty : tax_claim_storage);
+  } in  
+  let (taddr, _, _) = Test.originate main initial_storage 0tez in
+  let storage = Test.get_storage taddr in
+  let example_addr = ("tz1gjaF81ZRRvdzjobyfVNsAeSC6PScjfQwN" : address) in
+  let () = assert (Big_map.find_opt (example_addr, example_addr, 0n) storage.operators = (None : unit option)) in
+  let () = assert (Big_map.find_opt example_addr storage.tax_deposits = (None : tez option)) in
+  assert (Big_map.find_opt (example_addr, 0n) storage.tax_claims = (None : tez option))
