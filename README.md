@@ -29,3 +29,51 @@ Let's say they wish to still profit, so they choose the former. After 25 weeks, 
 [On Radical Markets - Vitalik Buterin](https://vitalik.ca/general/2018/04/20/radical_markets.html)
 
 [Partial Common Ownership - RadicalxChange](https://www.radicalxchange.org/concepts/partial-common-ownership/)
+
+## Usage
+
+### Compile
+
+```bash
+ligo compile contract Harberger.mligo --entry-point main
+```
+
+### Test
+
+```bash
+ligo run test Harberger.mligo
+```
+
+### Example storage
+
+```text
+{
+  ledger = Big_map.literal [
+    (("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), Set.add 0n (Set.empty : nat set));
+  ];
+  operators = (Big_map.empty : operator_storage);
+  token_metadata = Big_map.literal [
+    (0n, {
+      name = "My NFT";
+      tax = 500n;
+      tax_interval = 604800n;
+      tax_recipient = ("tz1gjaF81ZRRvdzjobyfVNsAeSC6PScjfQwN" : address);
+      extras = (Map.empty : (string, string) map);
+    })
+  ];
+  token_prices = Big_map.literal [
+    ((("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), 0n), {current = 7tez; minimum = 7tez});
+  ];
+  tax_deposits = Big_map.literal [
+    (("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), 20tez);
+  ];
+  tax_records = Big_map.literal [
+    ((("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), 0n), [
+      { value = 7tez;
+        start_date = Tezos.now;
+        end_date = (None : timestamp option) }
+    ]);
+  ];
+  tax_claims = (Big_map.empty : tax_claim_storage);
+}
+```
