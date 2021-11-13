@@ -386,6 +386,7 @@ let mint_token (mints, store: mint list * storage): return =
   let next_store = List.fold process_mint mints store in
   ([]: operation list), next_store
 
+(* Operator forces sales to buy tokens *)
 let force_sale (sales, store: forced_sale list * storage): return =
   let process_sale (acc, tx: (operation list * storage * tez) * forced_sale) =
     List.fold
@@ -492,18 +493,29 @@ let claim_tax (claims, store: tax_claim list * storage): return =
   in
   List.fold process_claim claims (([] : operation list), store)
 
+(* Operator updates prices of tokens *)
 let update_price (updates, store: price_update list * storage): return =
-  let process_update (prices, tx: token_price_storage * price_update) =
+  let process_update (s, tx: storage * price_update) =
     List.fold
-      (fun (prices, update: token_price_storage * price_set) ->
+      (fun (s, update: storage * price_set) ->
+        let ok = is_operator (tx.owner, update.token_id, s.operators) in
+        let tokens = find_tokens (tx.owner, s.ledger) in
         let key = tx.owner, update.token_id in
-        let price = find_price (key, prices) in
-        let next_price = {price with current = update.price} in
-        Big_map.update key (Some next_price) prices
-      ) tx.txs prices
+        let price = find_price (key, s.token_prices) in
+        if not Set.mem update.token_id tokens then
+          (failwith "token not owned" : storage)
+        else if update.price < price.minimum then
+          (failwith "cannot set below minimum price" : storage)
+        else
+          let r = end_tax (tx.owner, update.token_id, s.token_prices, s.tax_records) in
+          let next_price = {price with current = update.price} in
+          let next_token_prices = Big_map.update key (Some next_price) s.token_prices in
+          let next_tax_records = start_tax (tx.owner, update.token_id, next_token_prices, r) in
+          {s with token_prices = next_token_prices; tax_records = next_tax_records}
+      ) tx.txs s
   in
-  let next_token_prices = List.fold process_update updates store.token_prices in
-  ([]: operation list), {store with token_prices = next_token_prices}
+  let next_store = List.fold process_update updates store in
+  ([]: operation list), next_store
 
 (* Main function *)
 
