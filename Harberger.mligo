@@ -167,16 +167,19 @@ type storage = {
 
 (* Helper functions *)
 
+[@inline]
 let find_tokens (owner, ledger: address * ledger): token_id set =
   match Big_map.find_opt owner ledger with
   | None -> Set.empty
   | Some tokens -> tokens
 
+[@inline]
 let find_metadata (token_id, token_metadata: token_id * token_metadata_storage): token_metadata =
   match Big_map.find_opt token_id token_metadata with
   | None -> (failwith "token undefined" : token_metadata)
   | Some metadata -> metadata
 
+[@inline]
 let find_price (key, token_prices: (address * token_id) * token_price_storage): price =
   match Big_map.find_opt key token_prices with
   | None -> {
@@ -185,16 +188,19 @@ let find_price (key, token_prices: (address * token_id) * token_price_storage): 
     }
   | Some price -> price
 
+[@inline]
 let find_tax_deposit (owner, tax_deposits: address * tax_deposit_storage): tez =
   match Big_map.find_opt owner tax_deposits with
   | None -> 0tez
   | Some deposit -> deposit
 
+[@inline]
 let find_records (key, tax_records: (address * token_id) * tax_record_storage): tax_record list =
   match Big_map.find_opt key tax_records with
   | None -> []
   | Some record_list -> record_list
 
+[@inline]
 let find_claimed (key, tax_claims: (address * token_id) * tax_claim_storage): tez =
   match Big_map.find_opt key tax_claims with
   | None -> 0tez
@@ -302,10 +308,6 @@ let transfer (transfers, store: transfer list * storage): return =
           let next_ledger = add_token (dest.to_, dest.token_id, l) in
           let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
           let price = find_price ((tx.from_, dest.token_id), s.token_prices) in
-          let next_price = {
-            current = price;
-            minimum = price;
-          } in
           let next_token_prices = Big_map.update (dest.to_, dest.token_id) (Some price) s.token_prices in
           let next_tax_records = start_tax (dest.to_, dest.token_id, next_token_prices, r) in
           { s with
