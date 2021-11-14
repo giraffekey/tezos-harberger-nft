@@ -73,7 +73,6 @@ type forced_sale_origin =
 {
   from_: address;
   token_id: token_id;
-  amount: nat;
 }
 
 type forced_sale =
@@ -401,8 +400,7 @@ let force_sale (sales, store: forced_sale list * storage): return =
       (fun ((ops, s, amt), origin: (operation list * storage * tez) * forced_sale_origin) ->
         let key = origin.from_, origin.token_id in
         let price = find_price (key, s.token_prices) in
-        let cost = price.current * origin.amount in
-        if amt < cost then
+        if amt < price.current then
           (failwith "amount does not match cost" : operation list * storage * tez)
         else
           let _ok = is_operator (tx.to_, origin.token_id, s.operators) in
@@ -421,9 +419,9 @@ let force_sale (sales, store: forced_sale list * storage): return =
             tax_records = next_tax_records;
             token_prices = next_token_prices;
           } in
-          let next_amt = amt - cost in
+          let next_amt = amt - price.current in
           let op =
-            Tezos.transaction () cost
+            Tezos.transaction () price.current
             ( match (Tezos.get_contract_opt origin.from_ : unit contract option) with
               | Some contract -> contract
               | None -> failwith "contract does not exist" : unit contract)
@@ -551,6 +549,20 @@ let initial_storage: storage = {
   tax_claims = (Big_map.empty : tax_claim_storage);
 }
 
+let mint_test_token (to_, tax_recipient, c: address * address * entry_points contract) =
+  let mints = [
+    { to_ = to_;
+      token_id = 0n;
+      name = "My NFT";
+      tax = 500n;
+      tax_interval = 604800n;
+      tax_recipient = tax_recipient;
+      extras = (Map.empty : (string, string) map);
+      price = 5tez };
+  ] in
+  let () = Test.set_source tax_recipient in
+  Test.transfer_to_contract_exn c (Mint_token mints) 0tez
+
 let test_storage =
   let (taddr, _, _) = Test.originate main initial_storage 0tez in
   let storage = Test.get_storage taddr in
@@ -567,18 +579,7 @@ let test_mint_and_transfer =
   let second_owner_addr = Test.nth_bootstrap_account 2 in
   let (taddr, _, _) = Test.originate main initial_storage 0tez in
   let c = Test.to_contract taddr in
-  let mints = [
-    { to_ = first_owner_addr;
-      token_id = 0n;
-      name = "My NFT";
-      tax = 500n;
-      tax_interval = 604800n;
-      tax_recipient = tax_recipient_addr;
-      extras = (Map.empty : (string, string) map);
-      price = 5tez };
-  ] in
-  let () = Test.set_source tax_recipient_addr in
-  let () = Test.transfer_to_contract_exn c (Mint_token mints) 0tez in
+  let () = mint_test_token (first_owner_addr, tax_recipient_addr, c) in
   let storage = Test.get_storage taddr in
   let first_tokens = find_tokens (first_owner_addr, storage.ledger) in
   let second_tokens = find_tokens (second_owner_addr, storage.ledger) in
@@ -601,7 +602,7 @@ let test_mint_and_transfer =
         { to_ = second_owner_addr;
           token_id = 0n;
           amount = 1n };
-      ] }
+      ] };
   ] in
   let () = Test.set_source first_owner_addr in
   let () = Test.transfer_to_contract_exn c (Transfer transfers) 0tez in
@@ -626,4 +627,62 @@ let test_mint_and_transfer =
     | Some record -> record
   in
   let () = assert (record.value = 5tez && record.end_date = (None : timestamp option)) in
+  ()
+
+let test_transfer_as_operator =
+  let () = Test.reset_state 3n ([] : tez list) in
+  let first_owner_addr = Test.nth_bootstrap_account 0 in
+  let tax_recipient_addr = Test.nth_bootstrap_account 1 in
+  let second_owner_addr = Test.nth_bootstrap_account 2 in
+  let (taddr, _, _) = Test.originate main initial_storage 0tez in
+  let c = Test.to_contract taddr in
+  let () = mint_test_token (first_owner_addr, tax_recipient_addr, c) in
+  let updates = [
+    Add_operator {
+      owner = first_owner_addr;
+      operator = second_owner_addr;
+      token_id = 0n;
+    }
+  ] in
+  let () = Test.set_source first_owner_addr in
+  let () = Test.transfer_to_contract_exn c (Update_operators updates) 0tez in
+  let transfers = [
+    { from_ = first_owner_addr;
+      txs = [
+        { to_ = second_owner_addr;
+          token_id = 0n;
+          amount = 1n };
+      ] };
+  ] in
+  let () = Test.set_source second_owner_addr in
+  let () = Test.transfer_to_contract_exn c (Transfer transfers) 0tez in
+  let storage = Test.get_storage taddr in
+  let first_tokens = find_tokens (first_owner_addr, storage.ledger) in
+  let second_tokens = find_tokens (second_owner_addr, storage.ledger) in
+  let () = assert (Set.mem 0n second_tokens) in
+  let () = assert (Set.mem 0n first_tokens = false) in
+  ()
+
+let test_force_sale =
+  let () = Test.reset_state 3n ([] : tez list) in
+  let first_owner_addr = Test.nth_bootstrap_account 0 in
+  let tax_recipient_addr = Test.nth_bootstrap_account 1 in
+  let second_owner_addr = Test.nth_bootstrap_account 2 in
+  let (taddr, _, _) = Test.originate main initial_storage 0tez in
+  let c = Test.to_contract taddr in
+  let () = mint_test_token (first_owner_addr, tax_recipient_addr, c) in
+  let sales = [
+    { to_ = second_owner_addr;
+      txs = [
+        { from_ = first_owner_addr;
+          token_id = 0n };
+      ] };
+  ] in
+  let () = Test.set_source second_owner_addr in
+  let () = Test.transfer_to_contract_exn c (Force_sale sales) 5tez in
+  let storage = Test.get_storage taddr in
+  let first_tokens = find_tokens (first_owner_addr, storage.ledger) in
+  let second_tokens = find_tokens (second_owner_addr, storage.ledger) in
+  let () = assert (Set.mem 0n second_tokens) in
+  let () = assert (Set.mem 0n first_tokens = false) in
   ()
