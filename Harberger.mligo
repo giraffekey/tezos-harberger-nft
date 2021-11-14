@@ -297,12 +297,21 @@ let transfer (transfers, store: transfer list * storage): return =
         if dest.amount > 1n then
           (failwith "total supply of non-fungible cannot exceed one" : storage)
         else if dest.amount = 1n then
-          let _ok = is_operator (dest.to_, dest.token_id, s.operators) in
+          let _ok = is_operator (tx.from_, dest.token_id, s.operators) in
           let l = remove_token (tx.from_, dest.token_id, s.ledger) in
           let next_ledger = add_token (dest.to_, dest.token_id, l) in
           let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
-          let next_tax_records = start_tax (dest.to_, dest.token_id, s.token_prices, r) in
-          {s with ledger = next_ledger; tax_records = next_tax_records}
+          let price = find_price ((tx.from_, dest.token_id), s.token_prices) in
+          let next_price = {
+            current = price;
+            minimum = price;
+          } in
+          let next_token_prices = Big_map.update (dest.to_, dest.token_id) (Some price) s.token_prices in
+          let next_tax_records = start_tax (dest.to_, dest.token_id, next_token_prices, r) in
+          { s with
+            ledger = next_ledger;
+            token_prices = next_token_prices;
+            tax_records = next_tax_records }
         else
           s
       ) tx.txs s
@@ -530,19 +539,89 @@ let main (action, store: entry_points * storage): return =
   
 (* Unit tests *)
 
+let initial_storage: storage = {
+  ledger = (Big_map.empty : ledger);
+  operators = (Big_map.empty : operator_storage);
+  token_metadata = (Big_map.empty : token_metadata_storage);
+  token_prices = (Big_map.empty : token_price_storage);
+  tax_deposits = (Big_map.empty : tax_deposit_storage);
+  tax_records = (Big_map.empty : tax_record_storage);
+  tax_claims = (Big_map.empty : tax_claim_storage);
+}
+
 let test_storage =
-  let initial_storage = {
-    ledger = (Big_map.empty : ledger);
-    operators = (Big_map.empty : operator_storage);
-    token_metadata = (Big_map.empty : token_metadata_storage);
-    token_prices = (Big_map.empty : token_price_storage);
-    tax_deposits = (Big_map.empty : tax_deposit_storage);
-    tax_records = (Big_map.empty : tax_record_storage);
-    tax_claims = (Big_map.empty : tax_claim_storage);
-  } in
   let (taddr, _, _) = Test.originate main initial_storage 0tez in
   let storage = Test.get_storage taddr in
-  let example_addr = ("tz1gjaF81ZRRvdzjobyfVNsAeSC6PScjfQwN" : address) in
+  let example_addr = Test.nth_bootstrap_account 0 in
   let () = assert (Big_map.find_opt (example_addr, example_addr, 0n) storage.operators = (None : unit option)) in
   let () = assert (Big_map.find_opt example_addr storage.tax_deposits = (None : tez option)) in
-  assert (Big_map.find_opt (example_addr, 0n) storage.tax_claims = (None : tez option))
+  let () = assert (Big_map.find_opt (example_addr, 0n) storage.tax_claims = (None : tez option)) in
+  ()
+
+let test_mint_and_transfer =
+  let () = Test.reset_state 3n ([] : tez list) in
+  let first_owner_addr = Test.nth_bootstrap_account 0 in
+  let tax_recipient_addr = Test.nth_bootstrap_account 1 in
+  let second_owner_addr = Test.nth_bootstrap_account 2 in
+  let (taddr, _, _) = Test.originate main initial_storage 0tez in
+  let c = Test.to_contract taddr in
+  let mints = [
+    { to_ = first_owner_addr;
+      token_id = 0n;
+      name = "My NFT";
+      tax = 500n;
+      tax_interval = 604800n;
+      tax_recipient = tax_recipient_addr;
+      extras = (Map.empty : (string, string) map);
+      price = 5tez };
+  ] in
+  let () = Test.set_source tax_recipient_addr in
+  let () = Test.transfer_to_contract_exn c (Mint_token mints) 0tez in
+  let storage = Test.get_storage taddr in
+  let first_tokens = find_tokens (first_owner_addr, storage.ledger) in
+  let second_tokens = find_tokens (second_owner_addr, storage.ledger) in
+  let () = assert (Set.mem 0n first_tokens) in
+  let () = assert (Set.mem 0n second_tokens = false) in
+  let metadata = find_metadata (0n, storage.token_metadata) in
+  let () = assert (metadata.tax = 500n && metadata.tax_interval = 604800n) in
+  let price = find_price ((first_owner_addr, 0n), storage.token_prices) in
+  let () = assert (price.current = 5tez && price.minimum = 5tez) in
+  let record_list = find_records ((first_owner_addr, 0n), storage.tax_records) in
+  let record =
+    match List.head_opt record_list with
+    | None -> (failwith "no records" : tax_record)
+    | Some record -> record
+  in
+  let () = assert (record.value = 5tez && record.end_date = (None : timestamp option)) in
+  let transfers = [
+    { from_ = first_owner_addr;
+      txs = [
+        { to_ = second_owner_addr;
+          token_id = 0n;
+          amount = 1n };
+      ] }
+  ] in
+  let () = Test.set_source first_owner_addr in
+  let () = Test.transfer_to_contract_exn c (Transfer transfers) 0tez in
+  let storage = Test.get_storage taddr in
+  let first_tokens = find_tokens (first_owner_addr, storage.ledger) in
+  let second_tokens = find_tokens (second_owner_addr, storage.ledger) in
+  let () = assert (Set.mem 0n second_tokens) in
+  let () = assert (Set.mem 0n first_tokens = false) in
+  let price = find_price ((second_owner_addr, 0n), storage.token_prices) in
+  let () = assert (price.current = 5tez && price.minimum = 5tez) in
+  let record_list = find_records ((first_owner_addr, 0n), storage.tax_records) in
+  let record =
+    match List.head_opt record_list with
+    | None -> (failwith "no records" : tax_record)
+    | Some record -> record
+  in
+  let () = assert (record.value = 5tez && record.end_date <> (None : timestamp option)) in
+  let record_list = find_records ((second_owner_addr, 0n), storage.tax_records) in
+  let record =
+    match List.head_opt record_list with
+    | None -> (failwith "no records" : tax_record)
+    | Some record -> record
+  in
+  let () = assert (record.value = 5tez && record.end_date = (None : timestamp option)) in
+  ()
