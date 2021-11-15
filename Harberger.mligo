@@ -124,7 +124,9 @@ type price_update =
 
 type token_metadata = {
   name: string;
+  (* Percent with 2 decimal places, i.e. 550n = 5.5% *)
   tax: nat;
+  (* In seconds *)
   tax_interval: nat;
   tax_recipient: address;
   extras: (string, string) map;
@@ -206,6 +208,7 @@ let find_claimed (key, tax_claims: (address * token_id) * tax_claim_storage): te
   | None -> 0tez
   | Some claimed -> claimed
 
+(* Check if current sender has been added as operator to token by owner *)
 let is_operator (owner, token_id, operators: address * token_id * operator_storage): bool =
   if Tezos.sender = owner
   then true
@@ -213,11 +216,13 @@ let is_operator (owner, token_id, operators: address * token_id * operator_stora
   then true
   else (failwith "FA2_NOT_OPERATOR" : bool)
 
+(* Add token id to owner's collection *)
 let add_token (owner, token_id, ledger: address * token_id * ledger): ledger =
   let tokens = find_tokens (owner, ledger) in
   let next_tokens = Set.add token_id tokens in
   Big_map.update owner (Some next_tokens) ledger
 
+(* Remove token id from owner's collection *)
 let remove_token (owner, token_id, ledger: address * token_id * ledger): ledger =
   let tokens = find_tokens (owner, ledger) in
   if Set.mem token_id tokens then
@@ -228,6 +233,7 @@ let remove_token (owner, token_id, ledger: address * token_id * ledger): ledger 
   else
     (failwith "FA2_INSUFFICIENT_BALANCE" : ledger)
 
+(* Begin taxation period at current price and time with no end date *)
 let start_tax (owner, token_id, token_prices, tax_records
     : address * token_id * token_price_storage * tax_record_storage): tax_record_storage =
   let key = owner, token_id in
@@ -241,6 +247,7 @@ let start_tax (owner, token_id, token_prices, tax_records
   let next_record_list = record :: record_list in
   Big_map.update key (Some next_record_list) tax_records
 
+(* Find current tax record for a token and end it, preventing further charges *)
 let end_tax (owner, token_id, token_prices, tax_records
     : address * token_id * token_price_storage * tax_record_storage): tax_record_storage =
   let key = owner, token_id in
@@ -258,7 +265,7 @@ let end_tax (owner, token_id, token_prices, tax_records
   in
   Big_map.update key (Some next_record_list) tax_records
 
-(* Calculate how much weekly tax *)
+(* Calculate how much tax is owed *)
 let calculate_spent_tax (owner, token_id, store: address * token_id * storage): tez =
   let key = owner, token_id in
   let record_list = find_records (key, store.tax_records) in
@@ -266,13 +273,16 @@ let calculate_spent_tax (owner, token_id, store: address * token_id * storage): 
   let spent =
     List.fold
       (fun (spent, record: tez * tax_record) ->
+        (* If tax is still ongoing, use current time *)
         let end_date =
           match record.end_date with
           | None -> Tezos.now
           | Some date -> date
         in
         let time_passed = abs (end_date - record.start_date) in
+        (* 550n would be a 5.5% tax, so divide by 1000n *)
         let tax_amount = record.value * metadata.tax / 1000n in
+        (* Time passed and tax interval are both in seconds *)
         let added = tax_amount * time_passed / metadata.tax_interval in
         spent + added
       ) record_list 0tez
@@ -304,11 +314,19 @@ let transfer (transfers, store: transfer list * storage): return =
           (failwith "total supply of non-fungible cannot exceed one" : storage)
         else if dest.amount = 1n then
           let _ok = is_operator (tx.from_, dest.token_id, s.operators) in
+          (* Move token from "tx.from_" to "dest.to_" *)
           let l = remove_token (tx.from_, dest.token_id, s.ledger) in
           let next_ledger = add_token (dest.to_, dest.token_id, l) in
+          (* Previous owner should not be taxed on a token they no longer own *)
           let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
           let price = find_price ((tx.from_, dest.token_id), s.token_prices) in
+          (* Current and minimum price are transferred along with token *)
           let next_token_prices = Big_map.update (dest.to_, dest.token_id) (Some price) s.token_prices in
+          (*
+            This is currently a security vulnerability
+            Transferring a token to someone forces them to pay a tax on it
+            A request/accept system would allow transfers to be held in escrow instead
+          *)
           let next_tax_records = start_tax (dest.to_, dest.token_id, next_token_prices, r) in
           { s with
             ledger = next_ledger;
@@ -328,6 +346,7 @@ let balances (param, store: balance_of_param * storage): return =
       (failwith "FA2_TOKEN_UNDEFINED" : balance_of_response)
     else
       let tokens = find_tokens (r.owner, store.ledger) in
+      (* Tokens are non-fungible, so balance can only be 0 or 1 *)
       let bal =
         if Set.mem r.token_id tokens
         then 1n
@@ -361,10 +380,7 @@ let update_operators (updates, store: update_operator list * storage): return =
   let next_operators = List.fold process_update updates store.operators in
   ([]: operation list), {store with operators = next_operators}
 
-(*
-  Mints tokens in batch to recipients
-  Minters set a minimum price on behalf of recipient
-*)
+(* Mints tokens in batch to recipients *)
 let mint_token (mints, store: mint list * storage): return =
   let process_mint (s, mint: storage * mint) =
     if Big_map.mem mint.token_id store.token_metadata then
@@ -379,11 +395,17 @@ let mint_token (mints, store: mint list * storage): return =
         extras = mint.extras;
       } in
       let next_token_metadata = Big_map.update mint.token_id (Some metadata) s.token_metadata in
+      (* Minters set a current and minimum price on behalf of recipient *)
       let price = {
         current = mint.price;
         minimum = mint.price;
       } in
       let next_token_prices = Big_map.update (mint.to_, mint.token_id) (Some price) s.token_prices in
+      (*
+        This is currently a security vulnerability
+        It allows anyone to mint a token to someone and force them to pay them a tax on it
+        This can be used maliciously to steal tax deposits
+      *)
       let next_tax_records = start_tax (mint.to_, mint.token_id, next_token_prices, s.tax_records) in
       { s with
         ledger = next_ledger;
@@ -401,6 +423,7 @@ let force_sale (sales, store: forced_sale list * storage): return =
       (fun ((ops, s, amt), origin: (operation list * storage * tez) * forced_sale_origin) ->
         let key = origin.from_, origin.token_id in
         let price = find_price (key, s.token_prices) in
+        (* Price must always be greater than what it was bought at *)
         let next_minimum = price.current + 1mutez in
         if amt < price.current then
           (failwith "amount does not match cost" : operation list * storage * tez)
@@ -496,7 +519,10 @@ let claim_tax (claims, store: tax_claim list * storage): return =
           let claimed = find_claimed (key, s.tax_claims) in
           let next_claimed = claimed + claim.amount in
           let next_tax_claims = Big_map.update (claim.from_, claim.token_id) (Some next_claimed) s.tax_claims in
-          let next_store = {s with tax_claims = next_tax_claims} in
+          let deposit = find_tax_deposit (claim.from_, store.tax_deposits) in
+          let next_deposit = deposit - claim.amount in
+          let next_tax_deposits = Big_map.update claim.from_ (Some next_deposit) store.tax_deposits in
+          let next_store = {s with tax_claims = next_tax_claims; tax_deposits = next_tax_deposits} in
           let op = Tezos.transaction () claim.amount contract in
           op :: ops, next_store
       ) tx.txs acc
@@ -517,6 +543,7 @@ let update_price (updates, store: price_update list * storage): return =
         else if update.price < price.minimum then
           (failwith "cannot set below minimum price" : storage)
         else
+          (* Tax records need to be updated so it is taxing on correct price *)
           let r = end_tax (tx.owner, update.token_id, s.token_prices, s.tax_records) in
           let next_price = {price with current = update.price} in
           let next_token_prices = Big_map.update key (Some next_price) s.token_prices in
