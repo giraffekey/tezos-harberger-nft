@@ -73,6 +73,7 @@ type forced_sale_origin =
 {
   from_: address;
   token_id: token_id;
+  next_price: tez;
 }
 
 type forced_sale =
@@ -400,16 +401,19 @@ let force_sale (sales, store: forced_sale list * storage): return =
       (fun ((ops, s, amt), origin: (operation list * storage * tez) * forced_sale_origin) ->
         let key = origin.from_, origin.token_id in
         let price = find_price (key, s.token_prices) in
+        let next_minimum = price.current + 1mutez in
         if amt < price.current then
           (failwith "amount does not match cost" : operation list * storage * tez)
+        else if origin.next_price < next_minimum then
+          (failwith "new price is too low" : operation list * storage * tez)
         else
           let _ok = is_operator (tx.to_, origin.token_id, s.operators) in
           let l = remove_token (origin.from_, origin.token_id, s.ledger) in
           let next_ledger = add_token (tx.to_, origin.token_id, l) in
           let r = end_tax (origin.from_, origin.token_id, s.token_prices, s.tax_records) in
           let next_price = {
-            current = price.current + 1mutez;
-            minimum = price.current + 1mutez;
+            current = origin.next_price;
+            minimum = next_minimum;
           } in
           let next_token_prices = Big_map.update (tx.to_, origin.token_id) (Some next_price) s.token_prices in
           let next_tax_records = start_tax (tx.to_, origin.token_id, next_token_prices, r) in
@@ -671,7 +675,8 @@ let test_force_sale =
     { to_ = second_owner_addr;
       txs = [
         { from_ = first_owner_addr;
-          token_id = 0n };
+          token_id = 0n;
+          next_price = 10tez };
       ] };
   ] in
   let () = Test.set_source second_owner_addr in
@@ -682,7 +687,7 @@ let test_force_sale =
   let () = assert (Set.mem 0n second_tokens) in
   let () = assert (Set.mem 0n first_tokens = false) in
   let price = find_price ((second_owner_addr, 0n), storage.token_prices) in
-  let () = assert (price.current = 5.000001tez && price.minimum = 5.000001tez) in
+  let () = assert (price.current = 10tez && price.minimum = 5.000001tez) in
   ()
 
 let test_deposit_and_withdraw_tax =
