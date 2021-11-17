@@ -1,4 +1,5 @@
 #include "FA2Interface.mligo"
+
 (* Contract interface *)
 
 type mint =

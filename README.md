@@ -43,7 +43,7 @@ ligo compile contract Harberger.mligo --entry-point main
 ### Test
 
 ```bash
-ligo run test Harberger.mligo
+ligo run test Tests.mligo
 ```
 
 ### Example storage
