@@ -2,7 +2,7 @@
 
 Research project on implementing a Harberger tax for FA2-compliant non-fungible token contracts on the Tezos blockchain.
 
-**WARNING!** This project is experimental and has not been audited for security or bugs. If you are serious about deploying NFTs on Tezos use [Objkt](https://objkt.com/) or [Kalamint](https://kalamint.io/). Otherwise, feel free to take the risk and let me know if you have any problems!
+**WARNING!** This project is experimental and has not been audited for security or bugs. If you are serious about deploying NFTs on Tezos use  [Hic et Nunc](https://hicetnunc.art/), [Objkt](https://objkt.com/) or [Kalamint](https://kalamint.io/). Otherwise, feel free to take the risk and let me know if you have any problems!
 
 ## What is Harberger taxation?
 
