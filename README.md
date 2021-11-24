@@ -66,6 +66,7 @@ ligo run test Tests.mligo
   token_prices = Big_map.literal [
     ((("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), 0n), {current = 7tez; minimum = 7tez});
   ];
+  transfer_requests = (Big_map.empty : transfer_request_storage);
   tax_deposits = Big_map.literal [
     (("tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx" : address), 20tez);
   ];

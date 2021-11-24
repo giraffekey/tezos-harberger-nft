@@ -2,7 +2,7 @@
 
 (* Contract interface *)
 
-type mint =
+type mint_destination =
 [@layout:comb]
 {
   to_: address;
@@ -13,6 +13,34 @@ type mint =
   tax_recipient: address;
   extras: (string, string) map;
   price: tez;
+}
+
+type mint =
+[@layout:comb]
+{
+  from_: address;
+  txs: mint_destination list;
+}
+
+type transfer_accept_token =
+[@layout:comb]
+{
+  token_id: token_id;
+  price: tez;
+}
+
+type transfer_accept =
+[@layout:comb]
+{
+  to_: address;
+  txs: transfer_accept_token list;
+}
+
+type transfer_reject =
+[@layout:comb]
+{
+  to_: address;
+  txs: token_id set;
 }
 
 type forced_sale_origin =
@@ -90,6 +118,11 @@ type tax_record = {
   end_date: timestamp option;
 }
 
+type transfer_request = {
+  from_: address;
+  price: tez;
+}
+
 type ledger = (address, token_id set) big_map
 
 type operator_storage = ((address * address * token_id), unit) big_map
@@ -97,6 +130,8 @@ type operator_storage = ((address * address * token_id), unit) big_map
 type token_metadata_storage = (token_id, token_metadata) big_map
 
 type token_price_storage = ((address * token_id), price) big_map
+
+type transfer_request_storage = ((address * token_id), transfer_request) big_map
 
 type tax_deposit_storage = (address, tez) big_map
 
@@ -112,6 +147,7 @@ type storage = {
   tax_deposits: tax_deposit_storage;
   tax_records: tax_record_storage;
   tax_claims: tax_claim_storage;
+  transfer_requests: transfer_request_storage;
 }
 
 (* Helper functions *)
@@ -244,6 +280,8 @@ type entry_points =
 | Balance_of of balance_of_param
 | Update_operators of update_operator list
 | Mint_token of mint list
+| Accept_request of transfer_accept list
+| Reject_request of transfer_reject list
 | Force_sale of forced_sale list
 | Deposit_tax of tax_param
 | Withdraw_tax of tax_param
@@ -261,24 +299,19 @@ let transfer (transfers, store: transfer list * storage): return =
           (failwith "total supply of non-fungible cannot exceed one" : storage)
         else if dest.amount = 1n then
           let _ok = is_operator (tx.from_, dest.token_id, s.operators) in
-          (* Move token from "tx.from_" to "dest.to_" *)
-          let l = remove_token (tx.from_, dest.token_id, s.ledger) in
-          let next_ledger = add_token (dest.to_, dest.token_id, l) in
+          let next_ledger = remove_token (tx.from_, dest.token_id, s.ledger) in
           (* Previous owner should not be taxed on a token they no longer own *)
-          let r = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
+          let next_tax_records = end_tax (tx.from_, dest.token_id, s.token_prices, s.tax_records) in
           let price = find_price ((tx.from_, dest.token_id), s.token_prices) in
-          (* Current and minimum price are transferred along with token *)
-          let next_token_prices = Big_map.update (dest.to_, dest.token_id) (Some price) s.token_prices in
-          (*
-            This is currently a security vulnerability
-            Transferring a token to someone forces them to pay a tax on it
-            A request/accept system would allow transfers to be held in escrow instead
-          *)
-          let next_tax_records = start_tax (dest.to_, dest.token_id, next_token_prices, r) in
+          let transfer_request = {
+            from_ = tx.from_;
+            price = price.minimum;
+          } in
+          let next_transfer_requests = Big_map.update (dest.to_, dest.token_id) (Some transfer_request) s.transfer_requests in
           { s with
             ledger = next_ledger;
-            token_prices = next_token_prices;
-            tax_records = next_tax_records }
+            tax_records = next_tax_records;
+            transfer_requests = next_transfer_requests }
         else
           s
       ) tx.txs s
@@ -329,38 +362,89 @@ let update_operators (updates, store: update_operator list * storage): return =
 
 (* Mints tokens in batch to recipients *)
 let mint_token (mints, store: mint list * storage): return =
-  let process_mint (s, mint: storage * mint) =
-    if Big_map.mem mint.token_id store.token_metadata then
-      (failwith "token already exists" : storage)
-    else
-      let next_ledger = add_token (mint.to_, mint.token_id, s.ledger) in
-      let metadata = {
-        name = mint.name;
-        tax = mint.tax;
-        tax_interval = mint.tax_interval;
-        tax_recipient = mint.tax_recipient;
-        extras = mint.extras;
-      } in
-      let next_token_metadata = Big_map.update mint.token_id (Some metadata) s.token_metadata in
-      (* Minters set a current and minimum price on behalf of recipient *)
-      let price = {
-        current = mint.price;
-        minimum = mint.price;
-      } in
-      let next_token_prices = Big_map.update (mint.to_, mint.token_id) (Some price) s.token_prices in
-      (*
-        This is currently a security vulnerability
-        It allows anyone to mint a token to someone and force them to pay them a tax on it
-        This can be used maliciously to steal tax deposits
-      *)
-      let next_tax_records = start_tax (mint.to_, mint.token_id, next_token_prices, s.tax_records) in
-      { s with
-        ledger = next_ledger;
-        token_metadata = next_token_metadata;
-        token_prices = next_token_prices;
-        tax_records = next_tax_records }
+  let process_mint (s, tx: storage * mint) =
+    List.fold
+      (fun (s, mint: storage * mint_destination) ->
+        if Big_map.mem mint.token_id store.token_metadata then
+          (failwith "token already exists" : storage)
+        else
+          let _ok = is_operator (tx.from_, mint.token_id, s.operators) in
+          let metadata = {
+            name = mint.name;
+            tax = mint.tax;
+            tax_interval = mint.tax_interval;
+            tax_recipient = mint.tax_recipient;
+            extras = mint.extras;
+          } in
+          let next_token_metadata = Big_map.update mint.token_id (Some metadata) s.token_metadata in
+          let price = {
+            current = mint.price;
+            minimum = mint.price;
+          } in
+          let next_token_prices = Big_map.update (tx.from_, mint.token_id) (Some price) s.token_prices in
+          let transfer_request = {
+            from_ = tx.from_;
+            price = mint.price;
+          } in
+          let next_transfer_requests = Big_map.update (mint.to_, mint.token_id) (Some transfer_request) s.transfer_requests in
+          { s with
+            token_metadata = next_token_metadata;
+            token_prices = next_token_prices;
+            transfer_requests = next_transfer_requests }
+      ) tx.txs s
   in
   let next_store = List.fold process_mint mints store in
+  ([]: operation list), next_store
+
+(* Accept transfer request *)
+let accept_request (accepts, store: transfer_accept list * storage): return =
+  let accept_transfer (s, tx: storage * transfer_accept) =
+    List.fold
+      (fun (s, token: storage * transfer_accept_token) ->
+        let _ok = is_operator (tx.to_, token.token_id, s.operators) in
+        match Big_map.find_opt (tx.to_, token.token_id) s.transfer_requests with
+        | None -> (failwith "request not found" : storage)
+        | Some request ->
+          if token.price < request.price then
+            (failwith "cannot set below minimum price" : storage)
+          else
+            let next_ledger = add_token (tx.to_, token.token_id, s.ledger) in
+            let price = {
+              current = token.price;
+              minimum = request.price;
+            } in
+            let next_token_prices = Big_map.update (tx.to_, token.token_id) (Some price) s.token_prices in
+            let next_tax_records = start_tax (tx.to_, token.token_id, next_token_prices, s.tax_records) in
+            let next_transfer_requests = Big_map.update (tx.to_, token.token_id) (None : transfer_request option) s.transfer_requests in
+            { s with
+              ledger = next_ledger;
+              token_prices = next_token_prices;
+              tax_records = next_tax_records;
+              transfer_requests = next_transfer_requests }
+      ) tx.txs s
+  in
+  let next_store = List.fold accept_transfer accepts store in
+  ([]: operation list), next_store
+
+(* Reject transfer request *)
+let reject_request (rejects, store: transfer_reject list * storage): return =
+  let reject_transfer (s, tx: storage * transfer_reject) =
+    Set.fold
+      (fun (s, token_id: storage * token_id) ->
+        let _ok = is_operator (tx.to_, token_id, s.operators) in
+        match Big_map.find_opt (tx.to_, token_id) s.transfer_requests with
+        | None -> (failwith "request not found" : storage)
+        | Some request ->
+          let next_ledger = add_token (request.from_, token_id, s.ledger) in
+          let next_tax_records = start_tax (request.from_, token_id, s.token_prices, s.tax_records) in
+          let next_transfer_requests = Big_map.update (tx.to_, token_id) (None : transfer_request option) s.transfer_requests in
+          { s with
+            ledger = next_ledger;
+            tax_records = next_tax_records;
+            transfer_requests = next_transfer_requests }
+      ) tx.txs s
+  in
+  let next_store = List.fold reject_transfer rejects store in
   ([]: operation list), next_store
 
 (* Operator forces sales to buy tokens *)
@@ -509,6 +593,8 @@ let main (action, store: entry_points * storage): return =
   | Balance_of param -> balances (param, store)
   | Update_operators updates -> update_operators (updates, store)
   | Mint_token mints -> mint_token (mints, store)
+  | Accept_request accepts -> accept_request (accepts, store)
+  | Reject_request rejects -> reject_request (rejects, store)
   | Force_sale sales -> force_sale (sales, store)
   | Deposit_tax param -> deposit_tax (param, store)
   | Withdraw_tax param -> withdraw_tax (param, store)
